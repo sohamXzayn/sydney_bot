@@ -17,6 +17,9 @@ const {
   askDeepSeek, askQwenCoder, askLlama4 
 } = require("./aiServices");
 
+// --- IMPORT MEMORY MODULE ---
+const { getContext, saveMessage, clearContext } = require("./memory");
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -25,7 +28,7 @@ const client = new Client({
   ],
 });
 
-// Fixed the deprecation warning by using clientReady
+// Fixed the deprecation warning by using clientReady (Note: internally djs standard is 'ready')
 client.once("clientReady", (c) => {
   console.log(`✅ Logged in as ${c.user.tag}! Monitoring commands...`);
 });
@@ -38,7 +41,18 @@ client.on("messageCreate", async (message) => {
   const command = args.shift().toLowerCase();
   const prompt = args.join(" ");
 
-  // Utility to handle responses with Embeds and Typing status
+  // --- NEW: CLEAR MEMORY COMMAND ---
+  if (command === "!clear") {
+    try {
+      await clearContext(message.channel.id);
+      return message.reply("🧹 Memory cleared for this channel! Starting fresh.");
+    } catch (err) {
+      console.error("Clear Context Error:", err);
+      return message.reply("❌ Failed to clear memory.");
+    }
+  }
+
+  // Utility to handle responses with Embeds, Typing status, and Memory
   const handleAIRequest = async (aiName, color, fetchFn) => {
     if (!prompt) return message.reply(`Please provide a prompt for ${aiName}!`);
 
@@ -46,12 +60,26 @@ client.on("messageCreate", async (message) => {
     await message.channel.sendTyping();
 
     try {
-      const response = await fetchFn(prompt);
+      const channelId = message.channel.id;
+
+      // 1. Get previous messages for this specific channel
+      const history = await getContext(channelId);
+
+      // 2. Build the new context array (Old history + New prompt)
+      const fullHistory = [...history, { role: "user", content: prompt }];
+
+      // 3. Pass the FULL array to the AI instead of just the text prompt
+      const response = await fetchFn(fullHistory);
+
+      // 4. Save the interaction to Firebase RTDB
+      await saveMessage(channelId, "user", prompt);
+      await saveMessage(channelId, "assistant", response);
       
       const embed = new EmbedBuilder()
         .setColor(color)
         .setAuthor({ name: aiName })
         .setDescription(response.length > 4096 ? response.substring(0, 4092) + "..." : response)
+        .setFooter({ text: `Memory: ${fullHistory.length} messages active` }) // Added context indicator
         .setTimestamp();
 
       await message.reply({ embeds: [embed] });
@@ -75,15 +103,11 @@ client.on("messageCreate", async (message) => {
   }
 
   // --- Added Llama Models ---
-  
-
   else if (command === "!lam-pro") {
-    // Pass askLlamaPro here
     await handleAIRequest("Llama 3.3 (70B) - Pro", 0x00FF00, askLlamaPro);
   }
 
   else if (command === "!lam-fast") {
-    // Pass askLlamaScout here
     await handleAIRequest("Llama 4 Scout - Instant", 0xFFAA00, askLlamaScout);
   }
 
